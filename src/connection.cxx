@@ -1,4 +1,5 @@
 #include "connection.h"
+#include <sstream>
 
 nodejs_db_informix::Connection::Connection()
     : compress(false),
@@ -187,9 +188,41 @@ nodejs_db_informix::Connection::close() {
     this->alive = false;
 }
 
+/***
+ * Escaping parameters by replacing all ' to '' (doubling it).
+ ***/
 std::string
 nodejs_db_informix::Connection::escape(const std::string& s) const throw(nodejs_db::Exception&) {
-    return s;
+    std::string result(s);
+    size_t pos = 0;
+    while (true) {
+        pos = result.find("'", pos);
+        if (pos == std::string::npos)
+            break;
+        result.insert(pos, "'");
+        // move forward
+        pos += 2;
+    }
+
+    pos = 0;
+    while (true) {
+        pos = result.find("\n", pos);
+        if (pos == std::string::npos)
+            break;
+        result.erase(pos, 1);
+        result.insert(pos, "\\n");
+    }
+
+    pos = 0;
+    while (true) {
+        pos = result.find("\r", pos);
+        if (pos == std::string::npos)
+            break;
+        result.erase(pos, 1);
+        result.insert(pos, "\\r");
+    }
+
+    return result;
 }
 
 std::string
@@ -263,32 +296,39 @@ nodejs_db_informix::Connection::query(const std::string& query) const throw(node
 #ifdef DEV
     this->_testExecForIteration();
 #endif
+    std::stringstream err;
 
     ITQuery q(*(this->connection));
 
-    q.AddCallback(_QueryErrorHandler, (void*) &std::cerr);
+    q.AddCallback(_QueryErrorHandler, (void*) &err);
 
     ITSet *rs = q.ExecToSet(query.c_str());
 
-    if (rs == NULL || q.RowCount() <= 0) {
+    // Start Changed by pvmagacho - empty results
+    if (rs == NULL || q.RowCount() < 0) {
         if (q.Warn()) {
-            throw nodejs_db::Exception(
-                    std::string(q.SqlState())
-                    + ": "
-                    + std::string(q.WarningText())
-            );
+            err << "sqlstate: "
+                << q.SqlState().Data()
+                << ", warn: "
+                << q.WarningText().Data()
+                << ", "
+                ;
         }
 
         if (q.Error()) {
-            throw nodejs_db::Exception(
-                    std::string(q.SqlState())
-                    + ": "
-                    + std::string(q.ErrorText())
-            );
+            err << "sqlstate: "
+                << q.SqlState().Data()
+                << ", error: "
+                << q.ErrorText().Data()
+                << ", "
+                ;
         }
 
-        throw nodejs_db::Exception("Could not execute query");
+        err << "msg: Could not execute query: " << query;
+        if (rs == NULL) err << " (null)";
+        throw nodejs_db::Exception(err.str());
     }
+    // End Changed by pvmagacho - empty results
 
     // let the caller handle problems with q.RowType()
     return new nodejs_db_informix::Result(rs, q.RowType(), q.RowCount());
@@ -308,10 +348,35 @@ nodejs_db_informix::Connection::query_x(const std::string& query) const throw(no
 
     ITBool s = q.ExecForStatus(query.c_str());
 
+    if (!s) {
+        std::stringstream err;
+
+        if (q.Warn()) {
+            err << "sqlstate: "
+                << q.SqlState().Data()
+                << ", warn: "
+                << q.WarningText().Data()
+                << ", "
+                ;
+        }
+
+        if (q.Error()) {
+            err << "sqlstate: "
+                << q.SqlState().Data()
+                << ", error: "
+                << q.ErrorText().Data()
+                << ", "
+                ;
+        }
+
+        err << "msg: Could not execute query.";
+        throw nodejs_db::Exception(err.str());
+    }
+
+#ifdef DEBUG
     // query type
     ITString qt = q.Command();
 
-#ifdef DEV
     std::cout << "Type of query: " << qt.Data() << std::endl;
     std::cout << "Result of DML: " << s << std::endl;
 #endif
